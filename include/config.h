@@ -66,8 +66,9 @@
 #define MOUTH_PWM_CHANNEL_B   1        // LEDC channel for IN2
 
 // RMS → Motor mapping thresholds
-// Silence gate: below this RMS, mouth stays closed (noise floor filter)
-#define RMS_SILENCE_THRESHOLD 200
+// Absolute silence gate: below this RMS, mouth always stays closed
+// (catches true silence / noise floor only)
+#define RMS_SILENCE_THRESHOLD 80
 
 // Maximum RMS expected from a loud signal (for mapping to 0–255 PWM)
 #define RMS_MAX_EXPECTED      8000
@@ -76,9 +77,20 @@
 #define MOUTH_PWM_MIN         60
 #define MOUTH_PWM_MAX         220
 
-// Smoothing factor for exponential moving average (0.0–1.0)
-// Higher = more responsive but jittery. Lower = smoother but laggy.
-#define RMS_SMOOTHING_ALPHA   0.35f
+// --- Adaptive lip-sync envelope tracking ---
+// The mouth opens when instantaneous RMS exceeds a slow-moving baseline
+// by this ratio. 1.3 = must be 30% above baseline to open.
+#define LIPSYNC_PEAK_RATIO    1.3f
+
+// Smoothing for the slow-moving baseline (energy envelope of the song).
+// Lower = slower adaptation. 0.02 tracks over ~1–2 seconds at 60Hz.
+#define LIPSYNC_BASELINE_ALPHA  0.02f
+
+// Asymmetric smoothing for mouth position (fast attack, slow release)
+// Attack (mouth opens quickly to track syllables/beats)
+#define LIPSYNC_ATTACK_ALPHA    0.6f
+// Release (mouth closes smoothly, avoids flutter between words)
+#define LIPSYNC_RELEASE_ALPHA   0.12f
 
 // =============================================================================
 // BUTTON TIMING

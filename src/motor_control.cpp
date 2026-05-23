@@ -48,10 +48,6 @@ void MotorController::updateLipSync(const int16_t* samples, size_t count) {
     if (!samples || count == 0) return;
 
     // --- Compute RMS of the sample buffer ---
-    // RMS = sqrt(mean(x²))
-    // We use int64_t accumulator to avoid overflow:
-    //   max single sample² = 32767² = ~1.07 billion
-    //   max sum for 512 samples = ~549 billion — fits in int64_t
     int64_t sumSquares = 0;
     for (size_t i = 0; i < count; i++) {
         int32_t s = samples[i];
@@ -59,22 +55,57 @@ void MotorController::updateLipSync(const int16_t* samples, size_t count) {
     }
     float instantRMS = sqrtf((float)(sumSquares / (int64_t)count));
 
-    // --- Exponential Moving Average for smoothing ---
-    // Prevents jittery, seizure-like mouth movements.
-    // α = 0.35 gives a nice "punchy but smooth" feel at 16kHz / 256-sample buffers
-    // (update rate ~62Hz). Tweak RMS_SMOOTHING_ALPHA in config.h.
-    _smoothedRMS = (RMS_SMOOTHING_ALPHA * instantRMS) + 
-                   ((1.0f - RMS_SMOOTHING_ALPHA) * _smoothedRMS);
+    // --- Update slow-moving baseline (song energy envelope) ---
+    // This tracks the overall loudness of the song so we can detect
+    // relative peaks rather than using an absolute threshold.
+    // Seed the baseline on first non-silent sample to avoid slow ramp-up.
+    if (_baselineRMS < 1.0f && instantRMS > RMS_SILENCE_THRESHOLD) {
+        _baselineRMS = instantRMS;
+    } else {
+        _baselineRMS = (LIPSYNC_BASELINE_ALPHA * instantRMS) +
+                       ((1.0f - LIPSYNC_BASELINE_ALPHA) * _baselineRMS);
+    }
 
-    // --- Map RMS to PWM ---
-    uint8_t pwm = rmsToPWM(_smoothedRMS);
+    // --- Determine target mouth openness ---
+    float targetOpenness = 0.0f;
 
-    if (pwm == 0) {
-        // Below silence threshold — close mouth (coast)
+    if (instantRMS < RMS_SILENCE_THRESHOLD) {
+        // True silence — mouth fully closed
+        targetOpenness = 0.0f;
+    } else {
+        // Compare instantaneous RMS against the adaptive baseline.
+        // Mouth opens proportionally when the signal exceeds the baseline.
+        float threshold = _baselineRMS * LIPSYNC_PEAK_RATIO;
+
+        if (instantRMS > threshold) {
+            // How far above the threshold are we? Map to 0.0–1.0
+            float excess = instantRMS - threshold;
+            float range = _baselineRMS * 2.0f;  // Full open at ~3x baseline
+            targetOpenness = constrain(excess / range, 0.0f, 1.0f);
+        }
+    }
+
+    // --- Asymmetric smoothing (fast attack, slow release) ---
+    // Makes the mouth snap open on beats/syllables but close smoothly
+    float alpha;
+    if (targetOpenness > _mouthOpenness) {
+        alpha = LIPSYNC_ATTACK_ALPHA;   // Fast: track syllable onsets
+    } else {
+        alpha = LIPSYNC_RELEASE_ALPHA;  // Slow: smooth close between words
+    }
+    _mouthOpenness = (alpha * targetOpenness) + ((1.0f - alpha) * _mouthOpenness);
+
+    // Store for diagnostics
+    _smoothedRMS = instantRMS;
+
+    // --- Drive the motor ---
+    if (_mouthOpenness < 0.05f) {
+        // Effectively closed — coast (no power waste)
         ledcWrite(MOUTH_PWM_CHANNEL_A, 0);
         ledcWrite(MOUTH_PWM_CHANNEL_B, 0);
     } else {
-        // Open mouth proportionally — forward direction only
+        uint8_t pwm = MOUTH_PWM_MIN +
+                      (uint8_t)(_mouthOpenness * (float)(MOUTH_PWM_MAX - MOUTH_PWM_MIN));
         ledcWrite(MOUTH_PWM_CHANNEL_A, pwm);
         ledcWrite(MOUTH_PWM_CHANNEL_B, 0);
     }
@@ -138,6 +169,8 @@ void MotorController::stopAll() {
     digitalWrite(HEAD_IN3_PIN, LOW);
     digitalWrite(HEAD_IN4_PIN, LOW);
     _smoothedRMS = 0.0f;
+    _baselineRMS = 0.0f;
+    _mouthOpenness = 0.0f;
 }
 
 // =============================================================================

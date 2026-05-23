@@ -42,6 +42,8 @@ public:
 
 private:
     float _smoothedRMS = 0.0f;
+    float _baselineRMS = 0.0f;    // Slow-moving energy envelope of the audio
+    float _mouthOpenness = 0.0f;  // Smoothed mouth position (0.0–1.0)
 
     /// Map a smoothed RMS value to a PWM duty cycle
     uint8_t rmsToPWM(float rms);
