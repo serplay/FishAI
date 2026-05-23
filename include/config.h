@@ -79,18 +79,19 @@
 
 // --- Adaptive lip-sync envelope tracking ---
 // The mouth opens when instantaneous RMS exceeds a slow-moving baseline
-// by this ratio. 1.3 = must be 30% above baseline to open.
-#define LIPSYNC_PEAK_RATIO    1.3f
+// by this ratio. 1.6 = must be 60% above baseline to open.
+// Higher = more selective, only opens on vocal attacks / drum hits.
+#define LIPSYNC_PEAK_RATIO    1.6f
 
 // Smoothing for the slow-moving baseline (energy envelope of the song).
-// Lower = slower adaptation. 0.02 tracks over ~1–2 seconds at 60Hz.
-#define LIPSYNC_BASELINE_ALPHA  0.02f
+// 0.04 tracks over ~0.5s at 60Hz — fast enough to follow verse/chorus shifts.
+#define LIPSYNC_BASELINE_ALPHA  0.04f
 
-// Asymmetric smoothing for mouth position (fast attack, slow release)
-// Attack (mouth opens quickly to track syllables/beats)
-#define LIPSYNC_ATTACK_ALPHA    0.6f
-// Release (mouth closes smoothly, avoids flutter between words)
-#define LIPSYNC_RELEASE_ALPHA   0.12f
+// Asymmetric smoothing for mouth position (fast attack, fast release)
+// Attack — mouth snaps open on syllable onsets
+#define LIPSYNC_ATTACK_ALPHA    0.7f
+// Release — mouth closes quickly between syllables (~80ms to fully close)
+#define LIPSYNC_RELEASE_ALPHA   0.45f
 
 // =============================================================================
 // BUTTON TIMING
