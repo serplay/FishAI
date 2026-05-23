@@ -111,7 +111,7 @@
 // =============================================================================
 
 // Stack sizes — carefully tuned for no-PSRAM ESP32
-#define TASK_STACK_AUDIO        4096
+#define TASK_STACK_AUDIO        8192
 #define TASK_STACK_NETWORK      8192   // WiFi/WS needs more stack
 #define TASK_STACK_MOTOR        2048
 #define TASK_STACK_BUTTON       2048

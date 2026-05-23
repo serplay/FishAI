@@ -348,21 +348,19 @@ static void initBluetoothMode() {
     // Ensure WiFi is fully off to reclaim ~80KB of heap
     Network.disconnectWiFi();
     
-    // Initialize I2S amplifier for A2DP output
-    Audio.beginAmplifier();
+    // NOTE: Do NOT call Audio.beginAmplifier() here.
+    // The A2DP library manages its own I2S driver on I2S_NUM_0.
+    // Pre-initializing it would conflict with A2DP's I2S setup.
     
     // Create and configure A2DP Sink
     a2dpSink = new BluetoothA2DPSink();
     
-    // Register raw data callback for lip-sync
-    a2dpSink->set_stream_reader(a2dp_data_callback, false);
+    // Register raw data callback for lip-sync.
+    // Second param = true → library outputs audio to I2S AND calls our callback.
+    // (false would disable I2S output entirely, causing silence/beep)
+    a2dpSink->set_stream_reader(a2dp_data_callback, true);
     
     // Set I2S pins for the A2DP library's internal I2S driver
-    // Note: A2DP library manages its own I2S port (I2S_NUM_0).
-    // We already configured the amp pins — the library will reinit I2S.
-    // We stop our amp driver and let A2DP take over.
-    Audio.stopAmplifier();
-    
     i2s_pin_config_t pins = {};
     pins.bck_io_num = AMP_BCLK_PIN;
     pins.ws_io_num = AMP_LRC_PIN;
@@ -371,7 +369,7 @@ static void initBluetoothMode() {
     a2dpSink->set_pin_config(pins);
     
     // Start A2DP with device name
-    a2dpSink->start("Billy Bass 🐟");
+    a2dpSink->start("Billy Bass");
     
     g_state = SystemState::BT_STREAMING;
     Serial.printf("[BT] A2DP Sink active — Free heap: %d bytes\n", 
