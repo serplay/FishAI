@@ -141,18 +141,18 @@ void NetworkManager::stopCaptivePortal() {
 void NetworkManager::_setupRoutes() {
     // Serve the main portal page
     _server->on("/", HTTP_GET, [](AsyncWebServerRequest* req) {
-        req->send_P(200, "text/html", PORTAL_HTML);
+        req->send(200, "text/html", PORTAL_HTML);
     });
 
     // Captive portal detection endpoints (iOS/Android/Windows)
     _server->on("/hotspot-detect.html", HTTP_GET, [](AsyncWebServerRequest* req) {
-        req->send_P(200, "text/html", PORTAL_HTML);
+        req->send(200, "text/html", PORTAL_HTML);
     });
     _server->on("/generate_204", HTTP_GET, [](AsyncWebServerRequest* req) {
-        req->send_P(200, "text/html", PORTAL_HTML);
+        req->send(200, "text/html", PORTAL_HTML);
     });
     _server->on("/connecttest.txt", HTTP_GET, [](AsyncWebServerRequest* req) {
-        req->send_P(200, "text/html", PORTAL_HTML);
+        req->send(200, "text/html", PORTAL_HTML);
     });
 
     // WiFi scan endpoint

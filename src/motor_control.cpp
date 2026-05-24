@@ -53,7 +53,7 @@ void MotorController::updateLipSync(const int16_t* samples, size_t count) {
         int32_t s = samples[i];
         sumSquares += s * s;
     }
-    float instantRMS = sqrtf((float)(sumSquares / (int64_t)count));
+    float instantRMS = sqrtf((float)sumSquares / (float)count);
 
     // --- Update slow-moving baseline (song energy envelope) ---
     // This tracks the overall loudness of the song so we can detect
