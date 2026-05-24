@@ -38,6 +38,8 @@
 #include "network_manager.h"
 #include "button_handler.h"
 
+#include <math.h>
+
 // =============================================================================
 // GLOBALS
 // =============================================================================
@@ -220,9 +222,13 @@ static void motorTask(void* param) {
     bool     btWasSilent       = true;  // True if silence exceeded threshold
     bool     btHeadUp          = false; // Head is currently raised
     uint32_t btHeadUpSinceMs   = 0;     // When head was raised
-    bool     btDancing         = false; // Dance mode active
+    bool     btDancing         = false; // Dance mode active (within a burst)
     uint32_t btLastDanceMs     = 0;     // Last dance move timestamp
     bool     btDanceToggle     = false; // Alternates dance direction
+    bool     btDanceUnlocked   = false; // True once 30s threshold is passed
+    uint32_t btDanceBurstStartMs = 0;   // When current dance burst began
+    bool     btDanceResting    = false; // True during rest period between bursts
+    uint32_t btDanceRestStartMs  = 0;   // When current rest period began
     
     while (true) {
         SystemState state = g_state;
@@ -244,15 +250,31 @@ static void motorTask(void* param) {
                 // Always do lip-sync (mouth moves regardless of performance state)
                 Motors.updateLipSync(localBuf, count);
                 
+                // --- Compute RMS to distinguish real audio from silent frames ---
+                // A2DP sends PCM data even during silence (zero-valued frames),
+                // so we must check actual energy, not just data presence.
+                int64_t sumSq = 0;
+                for (size_t i = 0; i < count; i++) {
+                    int32_t s = localBuf[i];
+                    sumSq += s * s;
+                }
+                float frameRMS = sqrtf((float)(sumSq / (int64_t)count));
+                bool hasRealAudio = (frameRMS > RMS_SILENCE_THRESHOLD);
+                
                 // --- BT Performance Mode logic (only in BT_STREAMING) ---
                 if (state == SystemState::BT_STREAMING) {
-                    btLastAudioMs = now;
+                    // Only treat as "audio active" if there's actual energy
+                    if (hasRealAudio) {
+                        btLastAudioMs = now;
+                    }
                     
-                    // Detect audio resuming after silence
-                    if (btWasSilent) {
+                    // Detect audio resuming after silence (only on real audio)
+                    if (btWasSilent && hasRealAudio) {
                         btWasSilent = false;
                         btAudioStartMs = now;
                         btDancing = false;
+                        btDanceUnlocked = false;
+                        btDanceResting = false;
                         
                         // Raise head when audio starts after a silence gap
                         Motors.raiseHead();
@@ -261,30 +283,60 @@ static void motorTask(void* param) {
                         Serial.println("[BT-PERF] Audio resumed after silence — head up!");
                     }
                     
-                    // Check if it's time to start dancing (20s continuous audio)
-                    if (!btDancing && (now - btAudioStartMs) >= BT_DANCE_START_MS) {
+                    // Check if 30s of continuous audio unlocks dancing
+                    if (!btDanceUnlocked && (now - btAudioStartMs) >= BT_DANCE_START_MS) {
+                        btDanceUnlocked = true;
+                        // Start the first burst immediately
                         btDancing = true;
+                        btDanceResting = false;
+                        btDanceBurstStartMs = now;
                         btLastDanceMs = now;
-                        // Keep head up during dancing (non-blocking)
                         if (!btHeadUp) {
                             Motors.setHeadRaw(true);
                             btHeadUp = true;
                         }
-                        Serial.println("[BT-PERF] Dance mode activated!");
+                        Serial.println("[BT-PERF] Dance mode unlocked! Starting first burst.");
                     }
                     
-                    // Execute dance moves — non-blocking head/tail toggling
-                    // Uses setHeadRaw() to avoid the 300ms blocking delay
-                    // in lowerHead() which would freeze lip-sync
-                    if (btDancing && (now - btLastDanceMs) >= BT_DANCE_INTERVAL_MS) {
-                        btLastDanceMs = now;
-                        btDanceToggle = !btDanceToggle;
-                        Motors.setHeadRaw(btDanceToggle);  // Toggle direction
-                        btHeadUp = btDanceToggle;
+                    // --- Dance burst/rest cycle ---
+                    if (btDanceUnlocked) {
+                        if (btDanceResting) {
+                            // Currently resting — check if rest period is over
+                            if ((now - btDanceRestStartMs) >= BT_DANCE_REST_MS) {
+                                btDanceResting = false;
+                                btDancing = true;
+                                btDanceBurstStartMs = now;
+                                btLastDanceMs = now;
+                                if (!btHeadUp) {
+                                    Motors.setHeadRaw(true);
+                                    btHeadUp = true;
+                                }
+                                Serial.println("[BT-PERF] Rest over — new dance burst!");
+                            }
+                        } else if (btDancing) {
+                            // Currently in a dance burst — check if burst expired
+                            if ((now - btDanceBurstStartMs) >= BT_DANCE_BURST_MS) {
+                                btDancing = false;
+                                btDanceResting = true;
+                                btDanceRestStartMs = now;
+                                // Lower head during rest
+                                Motors.setHeadRaw(false);
+                                btHeadUp = false;
+                                Serial.println("[BT-PERF] Dance burst done — resting.");
+                            } else {
+                                // Execute dance moves within the burst
+                                if ((now - btLastDanceMs) >= BT_DANCE_INTERVAL_MS) {
+                                    btLastDanceMs = now;
+                                    btDanceToggle = !btDanceToggle;
+                                    Motors.setHeadRaw(btDanceToggle);
+                                    btHeadUp = btDanceToggle;
+                                }
+                            }
+                        }
                     }
                     
-                    // Lower head after lift duration (only if NOT dancing)
-                    if (btHeadUp && !btDancing && 
+                    // Lower head after lift duration (only if NOT dancing and not in burst cycle)
+                    if (btHeadUp && !btDancing && !btDanceResting &&
                         (now - btHeadUpSinceMs) >= BT_HEAD_LIFT_DURATION_MS) {
                         Motors.setHeadRaw(false);  // Non-blocking lower
                         btHeadUp = false;
@@ -299,6 +351,8 @@ static void motorTask(void* param) {
                         (now - btLastAudioMs) >= BT_SILENCE_TIMEOUT_MS) {
                         btWasSilent = true;
                         btDancing = false;
+                        btDanceUnlocked = false;
+                        btDanceResting = false;
                         
                         // Ensure head is down during silence
                         if (btHeadUp) {
@@ -317,6 +371,8 @@ static void motorTask(void* param) {
             // Reset BT performance state
             btWasSilent = true;
             btDancing = false;
+            btDanceUnlocked = false;
+            btDanceResting = false;
             if (btHeadUp) {
                 Motors.coastHead();
                 btHeadUp = false;

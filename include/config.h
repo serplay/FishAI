@@ -105,10 +105,16 @@
 #define BT_HEAD_LIFT_DURATION_MS  4000
 
 // After this many ms of continuous audio playback, start dancing
-#define BT_DANCE_START_MS         20000
+#define BT_DANCE_START_MS         30000
 
 // Interval between dance moves (head toggle / tail flap) in ms
 #define BT_DANCE_INTERVAL_MS      1500
+
+// Dance burst duration — how long a dance burst lasts (ms)
+#define BT_DANCE_BURST_MS         10000
+
+// Dance rest duration — how long to rest between bursts (ms)
+#define BT_DANCE_REST_MS          15000
 
 
 // =============================================================================
