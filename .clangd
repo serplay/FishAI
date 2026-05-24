@@ -1,8 +1,12 @@
 CompileFlags:
   Remove:
-    - -mlongcalls
-    - -fstrict-volatile-bitfields
-    - -fno-tree-switch-conversion
+    - "-mlongcalls*"
+    - "-fstrict-volatile-bitfields*"
+    - "-fno-tree-switch-conversion*"
   Add:
-    - --include-directory=C:/Users/kuba2/.platformio/packages/toolchain-xtensa-esp32/xtensa-esp32-elf/include
-    - --include-directory=C:/Users/kuba2/.platformio/packages/toolchain-xtensa-esp32/lib/gcc/xtensa-esp32-elf/8.4.0/include
+    - "-isystem"
+    - "C:/Users/kuba2/.platformio/packages/toolchain-xtensa-esp32/xtensa-esp32-elf/include"
+    - "-isystem"
+    - "C:/Users/kuba2/.platformio/packages/toolchain-xtensa-esp32/lib/gcc/xtensa-esp32-elf/8.4.0/include"
+    - "-isystem"
+    - "C:/Users/kuba2/.platformio/packages/toolchain-xtensa-esp32/xtensa-esp32-elf/sys-include"
