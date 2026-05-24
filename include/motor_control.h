@@ -31,8 +31,15 @@ public:
     /// Raise the head/body (e.g., when wake word detected)
     void raiseHead();
 
-    /// Lower the head/body back to resting position
+    /// Lower the head/body back to resting position (BLOCKING — 300ms pulse)
     void lowerHead();
+
+    /// Set head motor direction without blocking (for dance mode).
+    /// @param forward  true = head up, false = head down
+    void setHeadRaw(bool forward);
+
+    /// Coast the head motor (stop driving, free spin)
+    void coastHead();
 
     /// Emergency stop — all motors off
     void stopAll();

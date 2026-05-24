@@ -1,6 +1,7 @@
 .pio
 .vscode
 compile_commands.json
+.cache
 
 # Python server
 server/.env

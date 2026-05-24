@@ -213,8 +213,20 @@ static void motorTask(void* param) {
     
     int16_t localBuf[I2S_DMA_BUF_LEN];
     
+    // --- BT Performance Mode state ---
+    // Tracks silence/activity to trigger head lifts and dancing
+    uint32_t btLastAudioMs     = 0;     // Timestamp of last audio data received
+    uint32_t btAudioStartMs    = 0;     // When continuous audio playback began
+    bool     btWasSilent       = true;  // True if silence exceeded threshold
+    bool     btHeadUp          = false; // Head is currently raised
+    uint32_t btHeadUpSinceMs   = 0;     // When head was raised
+    bool     btDancing         = false; // Dance mode active
+    uint32_t btLastDanceMs     = 0;     // Last dance move timestamp
+    bool     btDanceToggle     = false; // Alternates dance direction
+    
     while (true) {
         SystemState state = g_state;
+        uint32_t now = millis();
         
         if (state == SystemState::BT_STREAMING || 
             state == SystemState::AI_RESPONDING) {
@@ -229,11 +241,86 @@ static void motorTask(void* param) {
             portEXIT_CRITICAL(&g_lipSyncMux);
             
             if (count > 0) {
+                // Always do lip-sync (mouth moves regardless of performance state)
                 Motors.updateLipSync(localBuf, count);
+                
+                // --- BT Performance Mode logic (only in BT_STREAMING) ---
+                if (state == SystemState::BT_STREAMING) {
+                    btLastAudioMs = now;
+                    
+                    // Detect audio resuming after silence
+                    if (btWasSilent) {
+                        btWasSilent = false;
+                        btAudioStartMs = now;
+                        btDancing = false;
+                        
+                        // Raise head when audio starts after a silence gap
+                        Motors.raiseHead();
+                        btHeadUp = true;
+                        btHeadUpSinceMs = now;
+                        Serial.println("[BT-PERF] Audio resumed after silence — head up!");
+                    }
+                    
+                    // Check if it's time to start dancing (20s continuous audio)
+                    if (!btDancing && (now - btAudioStartMs) >= BT_DANCE_START_MS) {
+                        btDancing = true;
+                        btLastDanceMs = now;
+                        // Keep head up during dancing (non-blocking)
+                        if (!btHeadUp) {
+                            Motors.setHeadRaw(true);
+                            btHeadUp = true;
+                        }
+                        Serial.println("[BT-PERF] Dance mode activated!");
+                    }
+                    
+                    // Execute dance moves — non-blocking head/tail toggling
+                    // Uses setHeadRaw() to avoid the 300ms blocking delay
+                    // in lowerHead() which would freeze lip-sync
+                    if (btDancing && (now - btLastDanceMs) >= BT_DANCE_INTERVAL_MS) {
+                        btLastDanceMs = now;
+                        btDanceToggle = !btDanceToggle;
+                        Motors.setHeadRaw(btDanceToggle);  // Toggle direction
+                        btHeadUp = btDanceToggle;
+                    }
+                    
+                    // Lower head after lift duration (only if NOT dancing)
+                    if (btHeadUp && !btDancing && 
+                        (now - btHeadUpSinceMs) >= BT_HEAD_LIFT_DURATION_MS) {
+                        Motors.setHeadRaw(false);  // Non-blocking lower
+                        btHeadUp = false;
+                        Serial.println("[BT-PERF] Head lowered (lift duration elapsed)");
+                    }
+                }
+            } else {
+                // No new audio data this frame
+                if (state == SystemState::BT_STREAMING) {
+                    // Check if silence threshold exceeded
+                    if (!btWasSilent && btLastAudioMs > 0 && 
+                        (now - btLastAudioMs) >= BT_SILENCE_TIMEOUT_MS) {
+                        btWasSilent = true;
+                        btDancing = false;
+                        
+                        // Ensure head is down during silence
+                        if (btHeadUp) {
+                            Motors.setHeadRaw(false);
+                            btHeadUp = false;
+                        }
+                        Motors.coastHead();
+                        Serial.println("[BT-PERF] Silence detected — ready for next performance");
+                    }
+                }
             }
         } else {
             // Not in an audio-active state — ensure mouth is closed
             Motors.closeMouth();
+            
+            // Reset BT performance state
+            btWasSilent = true;
+            btDancing = false;
+            if (btHeadUp) {
+                Motors.coastHead();
+                btHeadUp = false;
+            }
         }
         
         // ~60Hz update rate for smooth lip movement

@@ -159,6 +159,24 @@ void MotorController::lowerHead() {
     Serial.println("[MOTOR] Head lowered");
 }
 
+void MotorController::setHeadRaw(bool forward) {
+    // Non-blocking head direction — used by dance mode
+    // Does NOT coast automatically (caller must call coastHead() later)
+    if (forward) {
+        digitalWrite(HEAD_IN3_PIN, HIGH);
+        digitalWrite(HEAD_IN4_PIN, LOW);
+    } else {
+        digitalWrite(HEAD_IN3_PIN, LOW);
+        digitalWrite(HEAD_IN4_PIN, HIGH);
+    }
+}
+
+void MotorController::coastHead() {
+    // Stop driving the head motor (free spin)
+    digitalWrite(HEAD_IN3_PIN, LOW);
+    digitalWrite(HEAD_IN4_PIN, LOW);
+}
+
 // =============================================================================
 // Emergency Stop
 // =============================================================================

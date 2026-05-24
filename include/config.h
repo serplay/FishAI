@@ -94,6 +94,24 @@
 #define LIPSYNC_RELEASE_ALPHA   0.45f
 
 // =============================================================================
+// BT PERFORMANCE MODE (head / dance behavior during Bluetooth playback)
+// =============================================================================
+
+// After this many ms of silence (no audio data), the next audio onset
+// triggers a "performance" — head lifts and eventually dances.
+#define BT_SILENCE_TIMEOUT_MS     7000
+
+// How long the head stays raised after the performance starts (ms)
+#define BT_HEAD_LIFT_DURATION_MS  4000
+
+// After this many ms of continuous audio playback, start dancing
+#define BT_DANCE_START_MS         20000
+
+// Interval between dance moves (head toggle / tail flap) in ms
+#define BT_DANCE_INTERVAL_MS      1500
+
+
+// =============================================================================
 // BUTTON TIMING
 // =============================================================================
 
