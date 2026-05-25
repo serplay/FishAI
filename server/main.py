@@ -3,9 +3,9 @@
 # =============================================================================
 #
 # Entry point for the backend relay server. Hosts a WebSocket server that
-# the ESP32 connects to, and orchestrates the full AI pipeline:
+# the ESP32 connects to, and orchestrates the AI pipeline:
 #
-#   ESP32 Mic → Wake Word → Gemini → Chunker → ElevenLabs → ESP32 Speaker
+#   ESP32 Mic → Wake Word → ElevenLabs ConvAI → ESP32 Speaker
 #
 # Each ESP32 connection is managed by a SessionManager that handles the
 # state machine: IDLE → LISTENING → RESPONDING → IDLE.
@@ -19,8 +19,16 @@ import sys
 
 import websockets
 from websockets.server import ServerConnection
+from elevenlabs.client import ElevenLabs
 
-from config import LOG_LEVEL, SERVER_HOST, SERVER_PORT, WS_PATH
+from config import (
+    ELEVENLABS_API_KEY,
+    ELEVENLABS_AGENT_ID,
+    LOG_LEVEL,
+    SERVER_HOST,
+    SERVER_PORT,
+    WS_PATH,
+)
 from pipeline import ConversationPipeline
 from wake_word import WakeWordEngine
 
@@ -45,13 +53,11 @@ class SessionManager:
     Manages the lifecycle of a single ESP32 connection.
 
     States:
-      IDLE       — Wake word engine is listening. Audio goes to Porcupine.
-      LISTENING  — Wake detected. Audio goes to Gemini. Pipeline is running.
-      RESPONDING — Gemini is generating. Audio from ElevenLabs goes to ESP32.
+      IDLE       — Wake word engine is listening.
+      ACTIVE     — Wake detected. Audio bridges to ElevenLabs ConvAI.
 
-    The LISTENING and RESPONDING states are handled inside the pipeline;
-    from the SessionManager's perspective, the pipeline is either running
-    or not.
+    The conversation is handled inside the pipeline; from the
+    SessionManager's perspective, the pipeline is either running or not.
     """
 
     def __init__(self, ws: ServerConnection):
@@ -98,7 +104,7 @@ class SessionManager:
     async def _handle_audio(self, pcm_bytes: bytes):
         """Route incoming PCM audio to either wake word engine or pipeline."""
         if self._pipeline_task is not None and not self._pipeline_task.done():
-            # Pipeline is active — send audio to Gemini
+            # Pipeline is active — send audio to ConvAI
             try:
                 self._audio_queue.put_nowait(pcm_bytes)
             except asyncio.QueueFull:
@@ -264,8 +270,27 @@ async def handle_connection(websocket: ServerConnection):
         logger.info(f"Connection from {remote} ended")
 
 
+def _configure_agent():
+    """Ensure the ElevenLabs agent uses the right TTS model at startup."""
+    try:
+        client = ElevenLabs(api_key=ELEVENLABS_API_KEY)
+        client.conversational_ai.agents.update(
+            agent_id=ELEVENLABS_AGENT_ID,
+            conversation_config={
+                "tts": {"model_id": "eleven_v3_conversational"},
+            },
+        )
+        logger.info("Agent configured: eleven_v3_conversational")
+    except Exception as e:
+        logger.warning(f"Could not configure agent TTS model: {e}")
+        logger.warning("The agent will use whatever model is set in the dashboard")
+
+
 async def main():
     """Start the WebSocket server."""
+    # Configure agent TTS model on startup
+    _configure_agent()
+
     logger.info("=" * 60)
     logger.info("  🐟 Billy Bass AI Server")
     logger.info(f"  Listening on ws://{SERVER_HOST}:{SERVER_PORT}{WS_PATH}")

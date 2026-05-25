@@ -2,11 +2,11 @@
 
 An AI-powered animatronic Big Mouth Billy Bass that listens, thinks, and talks back — with synchronized lip movements, head gestures, and a sarcastic personality.
 
-Built on an **ESP32** microcontroller with a Python relay server that chains **Google Gemini** → **ElevenLabs** into a real-time conversational pipeline. Also works as a standalone **Bluetooth speaker** with automatic dance choreography.
+Built on an **ESP32** microcontroller with a Python relay server that bridges to **ElevenLabs Conversational AI** for real-time voice conversations. Also works as a standalone **Bluetooth speaker** with automatic dance choreography.
 
 ## Features
 
-- **AI Conversations** — Say "Hey Jarvis" (or press the button) and Billy responds with context-aware sass, powered by Gemini's multimodal understanding and ElevenLabs voice synthesis
+- **AI Conversations** — Say "Hey Jarvis" (or press the button) and Billy responds with real-time voice via ElevenLabs Conversational AI (ASR + LLM + TTS in one pipeline)
 - **Bluetooth Speaker** — Pairs as a standard A2DP receiver with real-time lip-sync to any music you stream
 - **Adaptive Lip-Sync** — RMS-based envelope tracking with fast attack / smooth release for natural mouth movement on both speech and music
 - **Dance Mode** — Detects sustained music playback and triggers head-bobbing dance bursts (10s on, 15s rest) — only after 30s of actual audio energy, not silence
@@ -16,7 +16,7 @@ Built on an **ESP32** microcontroller with a Python relay server that chains **G
 ## Architecture
 
 ```
-┌──────────────────────── ESP32 ────────────────────────┐
+┌──────────────────────── ESP32 ───────────────────────┐
 │                                                        │
 │  Mic (INMP441) ──I2S──► Audio Task ──WS──► Server     │
 │                                                        │
@@ -26,19 +26,16 @@ Built on an **ESP32** microcontroller with a Python relay server that chains **G
 │                    ──► Head GPIO (dance/gestures)      │
 │                                                        │
 │  State: PORTAL │ BT_STREAMING │ AI_IDLE/LISTEN/REPLY  │
-└────────────────────────────────────────────────────────┘
+└──────────────────────────────────────────────────────┘
           │ WebSocket (16kHz PCM + JSON)
           ▼
-┌──────────────── Ubuntu Relay Server ──────────────────┐
+┌──────────────── Relay Server ──────────────────┐
 │                                                        │
-│  openWakeWord (free) ──► Gemini Live (text only)      │
-│                              │                         │
-│                              ▼                         │
-│                     Text Chunker (. , ? !)             │
-│                              │                         │
-│                              ▼                         │
-│                     ElevenLabs TTS ──► PCM to ESP32   │
-└────────────────────────────────────────────────────────┘
+│  openWakeWord ──► ElevenLabs ConvAI (WebSocket)       │
+│                    │ ASR + LLM + TTS                  │
+│                    ▼                                    │
+│             PCM audio ─────────► ESP32               │
+└──────────────────────────────────────────────────────┘
 ```
 
 ## Hardware
@@ -77,7 +74,7 @@ Motor Driver (L298N)           Button
 - [PlatformIO](https://platformio.org/) (VS Code extension or CLI)
 - Python 3.10+
 - No wake word API key needed — [openWakeWord](https://github.com/dscripka/openWakeWord) is fully free
-- API keys for [Gemini](https://aistudio.google.com/apikey) and [ElevenLabs](https://elevenlabs.io/app/settings/api-keys)
+- An [ElevenLabs](https://elevenlabs.io/app/settings/api-keys) API key + [Conversational AI Agent](https://elevenlabs.io/app/conversational-ai) configured in the dashboard
 
 ### 1. Flash the Firmware
 
@@ -107,7 +104,7 @@ python -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
 
 cp .env.example .env
-# Fill in your API keys in .env
+# Fill in your ElevenLabs API key and Agent ID in .env
 
 python main.py
 ```
@@ -136,13 +133,11 @@ FishAI/
 │   └── button_handler.cpp     #   ISR-based polling
 ├── server/                    # Python relay server
 │   ├── main.py                #   WS server, session manager
-│   ├── pipeline.py            #   Gemini → Chunker → ElevenLabs
-│   ├── gemini_client.py       #   Gemini Multimodal Live client
-│   ├── elevenlabs_client.py   #   ElevenLabs streaming TTS
-│   ├── text_chunker.py        #   Punctuation-based text splitter
+│   ├── pipeline.py            #   ElevenLabs ConvAI bridge
 │   ├── wake_word.py           #   openWakeWord wake word engine
-│   ├── config.py              #   Env vars, models, system prompt
-│   ├── requirements.txt       #   websockets, google-genai, openwakeword
+│   ├── mock_client.py         #   Desktop mock ESP32 for testing
+│   ├── config.py              #   Env vars and constants
+│   ├── requirements.txt       #   websockets, openwakeword, aiohttp
 │   └── .env.example           #   API key template
 └── platformio.ini             # Build config, libs, partition table
 ```
@@ -169,13 +164,10 @@ See [`server/.env.example`](server/.env.example) for all options. Key variables:
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `GEMINI_API_KEY` | ✅ | Google Gemini API key |
 | `ELEVENLABS_API_KEY` | ✅ | ElevenLabs API key |
-| `ELEVENLABS_VOICE_ID` | ✅ | Voice to use for TTS |
+| `ELEVENLABS_AGENT_ID` | ✅ | Conversational AI agent ID (from dashboard) |
 | `OWW_MODEL_NAMES` | | Wake word model (default: `hey_jarvis_v0.1`) |
 | `OWW_THRESHOLD` | | Detection sensitivity (default: `0.5`) |
-| `GEMINI_MODEL` | | Default: `gemini-2.0-flash-live-preview` |
-| `ELEVENLABS_MODEL` | | Default: `eleven_flash_v2_5` |
 | `SERVER_PORT` | | Default: `8765` |
 
 ## Firmware Dependencies
@@ -195,5 +187,5 @@ Managed automatically by PlatformIO:
 - **No PSRAM** — all buffers are statically sized or stack-allocated. No `malloc` in hot paths.
 - **WiFi ⊕ Bluetooth** — mutually exclusive due to RAM. Mode is stored in NVS and requires reboot to switch.
 - **~400KB usable heap** after FreeRTOS + radio stack. The firmware uses `huge_app.csv` partitions (~3MB app, no OTA).
-- **Text-only Gemini** — the server requests text from Gemini (not audio) so the voice character is controlled by ElevenLabs, keeping latency low and personality consistent.
+- **ElevenLabs ConvAI** — the server is a thin bridge; ASR, LLM, TTS, and turn-taking are all handled by ElevenLabs. Agent personality is configured in the dashboard.
 - **Star grounding + decoupling caps** — prevents motor-induced brownouts from crashing the ESP32 on battery power.

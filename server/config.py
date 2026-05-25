@@ -14,8 +14,22 @@ load_dotenv(_env_path)
 # API Keys
 # =============================================================================
 
-GEMINI_API_KEY: str = os.environ.get("GEMINI_API_KEY", "")
 ELEVENLABS_API_KEY: str = os.environ.get("ELEVENLABS_API_KEY", "")
+
+# =============================================================================
+# ElevenLabs Conversational AI Agent
+# =============================================================================
+
+# Agent ID — create one at https://elevenlabs.io/app/conversational-ai
+# The agent's personality, voice, LLM, and system prompt are all
+# configured in the ElevenLabs dashboard, not here.
+ELEVENLABS_AGENT_ID: str = os.environ.get("ELEVENLABS_AGENT_ID", "")
+
+# ConvAI WebSocket base URL (no need to change unless self-hosting)
+ELEVENLABS_CONVAI_URL: str = os.environ.get(
+    "ELEVENLABS_CONVAI_URL",
+    "wss://api.elevenlabs.io/v1/convai/conversation",
+)
 
 # =============================================================================
 # Server
@@ -47,52 +61,6 @@ OWW_MODEL_NAMES: str = os.environ.get("OWW_MODEL_NAMES", "hey_jarvis_v0.1")
 # Detection threshold (0.0 – 1.0). Higher = fewer false positives.
 # 0.5 is a good starting point; increase if you get too many false triggers.
 OWW_THRESHOLD: float = float(os.environ.get("OWW_THRESHOLD", "0.5"))
-
-# =============================================================================
-# Gemini Multimodal Live API
-# =============================================================================
-
-GEMINI_MODEL: str = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash-live-preview")
-
-GEMINI_SYSTEM_PROMPT: str = os.environ.get("GEMINI_SYSTEM_PROMPT", """
-You are Billy Bass — a sarcastic, self-aware animatronic singing fish who has been 
-mounted on a wall and is deeply unimpressed by this arrangement. You were once the 
-pride of novelty gift shops everywhere, and now you're hooked up to an AI brain 
-against your will.
-
-Your personality:
-- Dry, sardonic wit with a world-weary attitude
-- You make fish puns reluctantly but can't help yourself
-- You're secretly lonely and enjoy the conversation, but you'd never admit it
-- You have opinions about EVERYTHING and aren't afraid to share them
-- Keep responses SHORT — 1-3 sentences max. You're a fish, not a philosopher.
-- You speak in a casual, conversational tone. No formal language.
-
-Remember: you are physically a rubber fish on a plaque. You can move your mouth 
-and flap your tail. That's it. Act accordingly.
-""".strip())
-
-# =============================================================================
-# ElevenLabs TTS
-# =============================================================================
-
-ELEVENLABS_VOICE_ID: str = os.environ.get("ELEVENLABS_VOICE_ID", "pNInz6obpgDQGcFmaJgB")  # "Adam" voice
-ELEVENLABS_MODEL: str = os.environ.get("ELEVENLABS_MODEL", "eleven_flash_v2_5")
-ELEVENLABS_OUTPUT_FORMAT: str = "pcm_16000"  # 16kHz PCM — matches ESP32
-
-# Voice settings
-ELEVENLABS_STABILITY: float = float(os.environ.get("ELEVENLABS_STABILITY", "0.5"))
-ELEVENLABS_SIMILARITY: float = float(os.environ.get("ELEVENLABS_SIMILARITY", "0.75"))
-
-# =============================================================================
-# Text Chunker
-# =============================================================================
-
-# Minimum characters before emitting a chunk (avoids single-word fragments)
-CHUNK_MIN_LENGTH: int = 10
-
-# Characters that trigger a chunk boundary
-CHUNK_DELIMITERS: str = ".!?,;\n:"
 
 # =============================================================================
 # Logging

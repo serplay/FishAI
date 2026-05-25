@@ -1,22 +1,31 @@
 # =============================================================================
-# pipeline.py — AI Conversation Cascade Orchestrator
+# pipeline.py — ElevenLabs Conversational AI Pipeline (SDK)
 # =============================================================================
 #
-# Manages the real-time streaming pipeline:
-#   ESP32 Mic PCM → Gemini (audio→text) → Chunker → ElevenLabs (text→PCM) → ESP32 Amp
+# Uses the official ElevenLabs Python SDK to run a Conversation with a
+# custom AudioInterface that bridges ESP32 WebSocket audio to the SDK.
 #
-# All stages run as concurrent asyncio tasks within an asyncio.TaskGroup.
-# Cancellation of any stage (ESP32 disconnect, user interrupt) propagates
-# cleanly to all others.
+# The SDK handles everything internally: ASR, LLM, TTS, turn-taking,
+# authentication, ping/pong, and audio encoding/decoding.
+#
+# Data flow:
+#   ESP32 Mic PCM → feed_audio() → SDK → ElevenLabs ConvAI
+#   ElevenLabs TTS → output()    → send_audio() → ESP32 Speaker
+#
+# The agent's personality, voice, model, and system prompt are all
+# configured in the ElevenLabs dashboard — not in this code.
 # =============================================================================
 
 import asyncio
 import logging
+import queue
+import threading
 from typing import Callable, Awaitable
 
-from gemini_client import GeminiLiveSession
-from elevenlabs_client import ElevenLabsStreamer
-from text_chunker import TextChunker
+from elevenlabs.client import ElevenLabs
+from elevenlabs.conversational_ai.conversation import Conversation, AudioInterface
+
+from config import ELEVENLABS_API_KEY, ELEVENLABS_AGENT_ID
 
 logger = logging.getLogger(__name__)
 
@@ -25,20 +34,119 @@ SendToESP32 = Callable[[bytes], Awaitable[None]]        # Binary PCM
 SendCommandToESP32 = Callable[[str], Awaitable[None]]    # JSON text
 
 
+# =============================================================================
+# Custom Audio Interface — bridges ESP32 ↔ ElevenLabs SDK
+# =============================================================================
+
+class ESP32AudioInterface(AudioInterface):
+    """
+    AudioInterface implementation that bridges the ESP32's WebSocket
+    audio stream to the ElevenLabs Conversation SDK.
+
+    Input path:  ESP32 mic PCM → feed_audio() → thread queue → SDK
+    Output path: SDK TTS PCM   → output()     → ESP32 speaker WebSocket
+    """
+
+    def __init__(
+        self,
+        event_loop: asyncio.AbstractEventLoop,
+        send_audio: SendToESP32,
+        send_command: SendCommandToESP32,
+    ):
+        self._loop = event_loop
+        self._send_audio = send_audio
+        self._send_command = send_command
+        self._input_queue: queue.Queue[bytes | None] = queue.Queue()
+        self._input_callback = None
+        self._running = False
+        self._input_thread: threading.Thread | None = None
+
+    def start(self, input_callback):
+        """Called by the SDK to start audio capture."""
+        self._input_callback = input_callback
+        self._running = True
+        self._input_thread = threading.Thread(
+            target=self._input_loop, daemon=True, name="esp32-audio-in"
+        )
+        self._input_thread.start()
+        logger.debug("ESP32 audio interface started")
+
+    def stop(self):
+        """Called by the SDK to stop audio capture."""
+        self._running = False
+        self._input_queue.put(None)  # Unblock the reader thread
+        if self._input_thread is not None:
+            self._input_thread.join(timeout=2)
+            self._input_thread = None
+        logger.debug("ESP32 audio interface stopped")
+
+    def output(self, audio: bytes):
+        """
+        Called by the SDK (from its thread) when agent TTS audio is ready.
+        Forwards raw PCM to the ESP32 via the asyncio WebSocket.
+        """
+        try:
+            future = asyncio.run_coroutine_threadsafe(
+                self._send_audio(audio), self._loop
+            )
+            # Block briefly to apply backpressure if the WebSocket is slow
+            future.result(timeout=5)
+        except Exception as e:
+            logger.warning(f"Failed to send audio to ESP32: {e}")
+
+    def interrupt(self):
+        """Called by the SDK when the user interrupts the agent mid-speech."""
+        logger.info("User interrupted the agent")
+        # Tell ESP32/mock client to flush its playback buffer immediately
+        try:
+            asyncio.run_coroutine_threadsafe(
+                self._send_command('{"type":"interrupt"}'), self._loop
+            )
+        except Exception as e:
+            logger.warning(f"Failed to send interrupt to ESP32: {e}")
+
+    # -- Public API for the pipeline --
+
+    def feed_audio(self, pcm_bytes: bytes):
+        """
+        Feed ESP32 microphone PCM into the SDK.
+        Called from the async pump task — safe to use from any thread.
+        """
+        try:
+            self._input_queue.put_nowait(pcm_bytes)
+        except queue.Full:
+            pass  # Drop frame if backed up
+
+    # -- Internal --
+
+    def _input_loop(self):
+        """Background thread: drains the queue and feeds the SDK."""
+        while self._running:
+            try:
+                chunk = self._input_queue.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            if chunk is None:
+                break
+            if self._input_callback is not None:
+                self._input_callback(chunk)
+
+
+# =============================================================================
+# Conversation Pipeline
+# =============================================================================
+
 class ConversationPipeline:
     """
-    Orchestrates a single conversation turn through the cascading pipeline.
-
-    The pipeline has 3 concurrent streaming tasks:
-      1. audio_to_gemini:     ESP32 mic PCM → Gemini audio input
-      2. gemini_to_elevenlabs: Gemini text → Chunker → ElevenLabs text input
-      3. elevenlabs_to_esp32:  ElevenLabs PCM → ESP32 speaker
+    Runs a single conversation between the ESP32 and ElevenLabs ConvAI.
 
     Lifecycle:
       1. Called when wake word or button press is detected
-      2. Runs until Gemini signals turn_complete or cancellation
-      3. Sends {"type":"done"} to ESP32 on completion
-      4. Returns control to the wake word listening state
+      2. Creates an ElevenLabs Conversation with a custom AudioInterface
+      3. Pumps ESP32 mic audio into the SDK while the session is active
+      4. SDK sends TTS audio back through the AudioInterface to the ESP32
+      5. Ends when the SDK closes the session or cancellation is requested
+      6. Sends {"type":"done"} to ESP32 on completion
     """
 
     def __init__(
@@ -51,51 +159,96 @@ class ConversationPipeline:
         self._send_audio = send_audio
         self._send_command = send_command
         self._cancelled = False
+        self._conversation: Conversation | None = None
 
     async def run(self):
         """
-        Execute the full conversation pipeline.
-        Blocks until the conversation turn is complete.
+        Execute the conversation pipeline.
+        Blocks until the conversation is complete.
         """
         logger.info("━━━ Conversation pipeline started ━━━")
 
-        gemini = GeminiLiveSession()
-        elevenlabs = ElevenLabsStreamer()
-        chunker = TextChunker()
+        loop = asyncio.get_event_loop()
+        audio_iface = ESP32AudioInterface(loop, self._send_audio, self._send_command)
 
-        # Queue to pass text chunks from Gemini→ElevenLabs
-        text_queue: asyncio.Queue[str | None] = asyncio.Queue()
+        client = ElevenLabs(api_key=ELEVENLABS_API_KEY)
+
+        self._conversation = Conversation(
+            client,
+            ELEVENLABS_AGENT_ID,
+            requires_auth=bool(ELEVENLABS_API_KEY),
+            audio_interface=audio_iface,
+            callback_agent_response=lambda r: logger.info(f"Agent: {r}"),
+            callback_agent_response_correction=lambda orig, corrected: (
+                logger.info(f"Agent (corrected): {corrected}")
+            ),
+            callback_user_transcript=lambda t: logger.info(f"User: {t}"),
+            callback_latency_measurement=lambda latency: (
+                logger.debug(f"Latency: {latency}ms")
+            ),
+        )
 
         try:
-            # Open both API connections concurrently
-            await asyncio.gather(
-                gemini.connect(),
-                elevenlabs.connect(),
+            # Start the SDK session (spawns internal threads)
+            self._conversation.start_session()
+            logger.info("ElevenLabs ConvAI session started")
+
+            # Run two tasks concurrently:
+            #   1. Pump ESP32 mic audio → AudioInterface (async)
+            #   2. Wait for SDK session to end (blocking → executor)
+            pump_task = asyncio.create_task(
+                self._pump_audio(audio_iface), name="audio-pump"
             )
 
-            # Run the 3 pipeline stages concurrently
-            async with asyncio.TaskGroup() as tg:
-                tg.create_task(
-                    self._audio_to_gemini(gemini),
-                    name="audio→gemini",
-                )
-                tg.create_task(
-                    self._gemini_to_elevenlabs(gemini, elevenlabs, chunker, text_queue),
-                    name="gemini→elevenlabs",
-                )
-                tg.create_task(
-                    self._elevenlabs_to_esp32(elevenlabs),
-                    name="elevenlabs→esp32",
+            async def _await_session_end():
+                return await loop.run_in_executor(
+                    None, self._conversation.wait_for_session_end
                 )
 
-        except* asyncio.CancelledError:
+            wait_task = asyncio.create_task(
+                _await_session_end(), name="session-wait"
+            )
+
+            done, pending = await asyncio.wait(
+                [pump_task, wait_task],
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+
+            # Cancel whichever is still running
+            for task in pending:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+
+            # Log the conversation ID
+            if wait_task in done:
+                # Session ended naturally
+                try:
+                    conv_id = wait_task.result()
+                    logger.info(f"Conversation ID: {conv_id}")
+                except Exception:
+                    pass
+            else:
+                # Audio pump ended first (ESP32 disconnected / cancelled)
+                self._conversation.end_session()
+                try:
+                    conv_id = await loop.run_in_executor(
+                        None, self._conversation.wait_for_session_end
+                    )
+                    logger.info(f"Conversation ID: {conv_id}")
+                except Exception:
+                    pass
+
+        except asyncio.CancelledError:
             logger.info("Pipeline cancelled")
-        except* Exception as eg:
-            for exc in eg.exceptions:
-                logger.error(f"Pipeline error: {exc}", exc_info=exc)
+            if self._conversation is not None:
+                self._conversation.end_session()
+        except Exception as e:
+            logger.error(f"Pipeline error: {e}", exc_info=True)
         finally:
-            # Clean up API connections
-            await self._cleanup(gemini, elevenlabs)
+            self._conversation = None
 
             # Signal ESP32 that the response is complete
             if not self._cancelled:
@@ -109,130 +262,25 @@ class ConversationPipeline:
     def cancel(self):
         """Signal cancellation (e.g., ESP32 disconnected or user pressed cancel)."""
         self._cancelled = True
+        if self._conversation is not None:
+            self._conversation.end_session()
 
-    # =========================================================================
-    # Stage 1: ESP32 Mic → Gemini
-    # =========================================================================
-
-    async def _audio_to_gemini(self, gemini: GeminiLiveSession):
+    async def _pump_audio(self, audio_iface: ESP32AudioInterface):
         """
-        Continuously read PCM audio from the ESP32 queue and stream it
-        to Gemini for real-time speech understanding.
+        Continuously drain the asyncio audio queue and feed chunks
+        into the ESP32AudioInterface's thread-safe input queue.
         """
-        logger.debug("Stage 1: audio→gemini started")
-        try:
-            while not self._cancelled:
-                # Wait for audio with a timeout to check cancellation
-                try:
-                    pcm_bytes = await asyncio.wait_for(
-                        self._audio_in.get(), timeout=0.1
-                    )
-                except asyncio.TimeoutError:
-                    continue
+        while not self._cancelled:
+            try:
+                pcm_bytes = await asyncio.wait_for(
+                    self._audio_in.get(), timeout=0.1
+                )
+            except asyncio.TimeoutError:
+                continue
 
-                if pcm_bytes is None:
-                    # Sentinel: no more audio (ESP32 disconnected)
-                    logger.info("Audio stream ended (sentinel)")
-                    break
+            if pcm_bytes is None:
+                # Sentinel: ESP32 disconnected
+                logger.info("Audio stream ended (sentinel)")
+                break
 
-                await gemini.send_audio(pcm_bytes)
-
-        except asyncio.CancelledError:
-            raise
-        except Exception as e:
-            logger.error(f"audio→gemini error: {e}")
-            raise
-
-    # =========================================================================
-    # Stage 2: Gemini Text → Chunker → ElevenLabs
-    # =========================================================================
-
-    async def _gemini_to_elevenlabs(
-        self,
-        gemini: GeminiLiveSession,
-        elevenlabs: ElevenLabsStreamer,
-        chunker: TextChunker,
-        text_queue: asyncio.Queue[str | None],
-    ):
-        """
-        Receive text tokens from Gemini, chunk them at sentence boundaries,
-        and send chunks to ElevenLabs for synthesis.
-        """
-        logger.debug("Stage 2: gemini→elevenlabs started")
-        full_response = ""
-
-        try:
-            async for token in gemini.receive_text():
-                if self._cancelled:
-                    break
-
-                full_response += token
-                logger.debug(f"Gemini token: {token!r}")
-
-                # Feed token to chunker — may emit 0 or more chunks
-                for chunk in chunker.feed(token):
-                    logger.info(f"→ ElevenLabs chunk: {chunk!r}")
-                    await elevenlabs.send_text(chunk, flush=True)
-
-            # Flush any remaining text from the chunker
-            remaining = chunker.flush()
-            if remaining and not self._cancelled:
-                logger.info(f"→ ElevenLabs final: {remaining!r}")
-                await elevenlabs.send_text(remaining, flush=True)
-
-            # Signal ElevenLabs that text input is complete
-            await elevenlabs.finish()
-
-            logger.info(f"Full Gemini response: {full_response!r}")
-
-        except asyncio.CancelledError:
-            chunker.reset()
-            raise
-        except Exception as e:
-            logger.error(f"gemini→elevenlabs error: {e}")
-            raise
-
-    # =========================================================================
-    # Stage 3: ElevenLabs Audio → ESP32
-    # =========================================================================
-
-    async def _elevenlabs_to_esp32(self, elevenlabs: ElevenLabsStreamer):
-        """
-        Receive PCM audio chunks from ElevenLabs and relay them
-        directly to the ESP32 WebSocket connection.
-        """
-        logger.debug("Stage 3: elevenlabs→esp32 started")
-        total_bytes = 0
-
-        try:
-            async for pcm_bytes in elevenlabs.receive_audio():
-                if self._cancelled:
-                    break
-
-                await self._send_audio(pcm_bytes)
-                total_bytes += len(pcm_bytes)
-
-            logger.info(f"Audio relay complete — {total_bytes:,} bytes sent to ESP32")
-
-        except asyncio.CancelledError:
-            raise
-        except Exception as e:
-            logger.error(f"elevenlabs→esp32 error: {e}")
-            raise
-
-    # =========================================================================
-    # Cleanup
-    # =========================================================================
-
-    async def _cleanup(
-        self, gemini: GeminiLiveSession, elevenlabs: ElevenLabsStreamer
-    ):
-        """Close API connections gracefully."""
-        close_tasks = []
-        if gemini.is_connected:
-            close_tasks.append(gemini.close())
-        if elevenlabs.is_connected:
-            close_tasks.append(elevenlabs.close())
-
-        if close_tasks:
-            await asyncio.gather(*close_tasks, return_exceptions=True)
+            audio_iface.feed_audio(pcm_bytes)
