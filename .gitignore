@@ -5,7 +5,7 @@ compile_commands.json
 
 # Python server
 server/.env
-server/venv/
+server/.venv/
 server/__pycache__/
 server/*.pyc
 *.ppn

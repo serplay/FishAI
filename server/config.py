@@ -16,7 +16,6 @@ load_dotenv(_env_path)
 
 GEMINI_API_KEY: str = os.environ.get("GEMINI_API_KEY", "")
 ELEVENLABS_API_KEY: str = os.environ.get("ELEVENLABS_API_KEY", "")
-PICOVOICE_ACCESS_KEY: str = os.environ.get("PICOVOICE_ACCESS_KEY", "")
 
 # =============================================================================
 # Server
@@ -36,19 +35,18 @@ CHANNELS: int = 1              # mono
 AUDIO_MIME: str = "audio/pcm;rate=16000"
 
 # =============================================================================
-# Picovoice Porcupine (Wake Word)
+# openWakeWord (Wake Word)
 # =============================================================================
 
-# Path to custom .ppn keyword file (trained at https://console.picovoice.ai/)
-# Leave empty to use a built-in keyword as fallback.
-PORCUPINE_KEYWORD_PATH: str = os.environ.get("PORCUPINE_KEYWORD_PATH", "")
+# Comma-separated list of pre-trained model names to load.
+# Available models: "hey_jarvis_v0.1", "alexa_v0.1", "hey_mycroft_v0.1", etc.
+# See: https://github.com/dscripka/openWakeWord#pre-trained-models
+# Leave empty to load ALL available models (not recommended for performance).
+OWW_MODEL_NAMES: str = os.environ.get("OWW_MODEL_NAMES", "hey_jarvis_v0.1")
 
-# Built-in keyword fallback (used if PORCUPINE_KEYWORD_PATH is empty)
-# Options: "computer", "jarvis", "alexa", "hey google", "ok google", etc.
-PORCUPINE_BUILTIN_KEYWORD: str = os.environ.get("PORCUPINE_BUILTIN_KEYWORD", "jarvis")
-
-# Detection sensitivity (0.0 – 1.0). Higher = more sensitive but more false positives.
-PORCUPINE_SENSITIVITY: float = float(os.environ.get("PORCUPINE_SENSITIVITY", "0.6"))
+# Detection threshold (0.0 – 1.0). Higher = fewer false positives.
+# 0.5 is a good starting point; increase if you get too many false triggers.
+OWW_THRESHOLD: float = float(os.environ.get("OWW_THRESHOLD", "0.5"))
 
 # =============================================================================
 # Gemini Multimodal Live API

@@ -6,7 +6,7 @@ Built on an **ESP32** microcontroller with a Python relay server that chains **G
 
 ## Features
 
-- **AI Conversations** — Say "Hey Vega" (or press the button) and Billy responds with context-aware sass, powered by Gemini's multimodal understanding and ElevenLabs voice synthesis
+- **AI Conversations** — Say "Hey Jarvis" (or press the button) and Billy responds with context-aware sass, powered by Gemini's multimodal understanding and ElevenLabs voice synthesis
 - **Bluetooth Speaker** — Pairs as a standard A2DP receiver with real-time lip-sync to any music you stream
 - **Adaptive Lip-Sync** — RMS-based envelope tracking with fast attack / smooth release for natural mouth movement on both speech and music
 - **Dance Mode** — Detects sustained music playback and triggers head-bobbing dance bursts (10s on, 15s rest) — only after 30s of actual audio energy, not silence
@@ -31,7 +31,7 @@ Built on an **ESP32** microcontroller with a Python relay server that chains **G
           ▼
 ┌──────────────── Ubuntu Relay Server ──────────────────┐
 │                                                        │
-│  Porcupine Wake Word ──► Gemini Live (text only)      │
+│  openWakeWord (free) ──► Gemini Live (text only)      │
 │                              │                         │
 │                              ▼                         │
 │                     Text Chunker (. , ? !)             │
@@ -76,7 +76,8 @@ Motor Driver (L298N)           Button
 
 - [PlatformIO](https://platformio.org/) (VS Code extension or CLI)
 - Python 3.10+
-- API keys for [Gemini](https://aistudio.google.com/apikey), [ElevenLabs](https://elevenlabs.io/app/settings/api-keys), and [Picovoice](https://console.picovoice.ai/)
+- No wake word API key needed — [openWakeWord](https://github.com/dscripka/openWakeWord) is fully free
+- API keys for [Gemini](https://aistudio.google.com/apikey) and [ElevenLabs](https://elevenlabs.io/app/settings/api-keys)
 
 ### 1. Flash the Firmware
 
@@ -139,9 +140,9 @@ FishAI/
 │   ├── gemini_client.py       #   Gemini Multimodal Live client
 │   ├── elevenlabs_client.py   #   ElevenLabs streaming TTS
 │   ├── text_chunker.py        #   Punctuation-based text splitter
-│   ├── wake_word.py           #   Porcupine wake word engine
+│   ├── wake_word.py           #   openWakeWord wake word engine
 │   ├── config.py              #   Env vars, models, system prompt
-│   ├── requirements.txt       #   websockets, google-genai, pvporcupine
+│   ├── requirements.txt       #   websockets, google-genai, openwakeword
 │   └── .env.example           #   API key template
 └── platformio.ini             # Build config, libs, partition table
 ```
@@ -171,7 +172,8 @@ See [`server/.env.example`](server/.env.example) for all options. Key variables:
 | `GEMINI_API_KEY` | ✅ | Google Gemini API key |
 | `ELEVENLABS_API_KEY` | ✅ | ElevenLabs API key |
 | `ELEVENLABS_VOICE_ID` | ✅ | Voice to use for TTS |
-| `PICOVOICE_ACCESS_KEY` | ✅ | Picovoice key for wake word |
+| `OWW_MODEL_NAMES` | | Wake word model (default: `hey_jarvis_v0.1`) |
+| `OWW_THRESHOLD` | | Detection sensitivity (default: `0.5`) |
 | `GEMINI_MODEL` | | Default: `gemini-2.0-flash-live-preview` |
 | `ELEVENLABS_MODEL` | | Default: `eleven_flash_v2_5` |
 | `SERVER_PORT` | | Default: `8765` |
