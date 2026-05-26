@@ -67,6 +67,7 @@ class SessionManager:
         self._pipeline: ConversationPipeline | None = None
         self._pipeline_task: asyncio.Task | None = None
         self._running = True
+        self._audio_chunks_received = 0  # Diagnostics counter
 
     async def run(self):
         """
@@ -103,6 +104,10 @@ class SessionManager:
 
     async def _handle_audio(self, pcm_bytes: bytes):
         """Route incoming PCM audio to either wake word engine or pipeline."""
+        self._audio_chunks_received += 1
+        if self._audio_chunks_received == 1:
+            logger.info(f"✓ First audio chunk received from client ({len(pcm_bytes)} bytes)")
+
         if self._pipeline_task is not None and not self._pipeline_task.done():
             # Pipeline is active — send audio to ConvAI
             try:

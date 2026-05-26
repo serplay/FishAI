@@ -63,11 +63,15 @@ Status: <b id="st">Initializing...</b>
 </div>
 </div>
 <script>
-fetch('/scan').then(r=>r.json()).then(d=>{
-  let s=document.getElementById('networks');
-  s.innerHTML='';
-  d.forEach(n=>{let o=document.createElement('option');o.value=n.ssid;o.textContent=n.ssid+' ('+n.rssi+'dBm)';s.appendChild(o)});
-}).catch(()=>{document.getElementById('networks').innerHTML='<option>Scan failed</option>'});
+function scanWifi(){
+  fetch('/scan').then(r=>r.json()).then(d=>{
+    let s=document.getElementById('networks');
+    if(d.length===0){s.innerHTML='<option>Scanning...</option>';setTimeout(scanWifi,2000);return;}
+    s.innerHTML='';
+    d.forEach(n=>{let o=document.createElement('option');o.value=n.ssid;o.textContent=n.ssid+' ('+n.rssi+'dBm)';s.appendChild(o)});
+  }).catch(()=>{document.getElementById('networks').innerHTML='<option>Scan failed — tap to retry</option>';setTimeout(scanWifi,3000);});
+}
+scanWifi();
 fetch('/status').then(r=>r.json()).then(d=>{document.getElementById('st').textContent=d.status});
 </script>
 </body>
@@ -114,6 +118,10 @@ void NetworkManager::startCaptivePortal() {
     xTaskCreatePinnedToCore(dnsTask, "dns", 2048, dnsServer, 1, 
                             &dnsTaskHandle, 0);
 
+    // Kick off initial WiFi scan so results are ready when the page loads
+    WiFi.scanNetworks(true);
+    Serial.println("[NET] Initial WiFi scan started");
+
     // Async web server
     _server = new AsyncWebServer(80);
     _setupRoutes();
@@ -159,19 +167,25 @@ void NetworkManager::_setupRoutes() {
     _server->on("/scan", HTTP_GET, [](AsyncWebServerRequest* req) {
         int n = WiFi.scanComplete();
         if (n == WIFI_SCAN_FAILED) {
-            WiFi.scanNetworks(true);  // Async scan
-            req->send(200, "application/json", "[]");
+            WiFi.scanNetworks(true);  // Kick off async scan
+            req->send(200, "application/json", "[]");  // Empty = still scanning
+            return;
+        }
+        if (n == WIFI_SCAN_RUNNING) {
+            req->send(200, "application/json", "[]");  // Empty = still scanning
             return;
         }
         JsonDocument doc;
         JsonArray arr = doc.to<JsonArray>();
         for (int i = 0; i < n && i < 15; i++) {
+            // Skip hidden networks (empty SSID)
+            if (WiFi.SSID(i).length() == 0) continue;
             JsonObject net = arr.add<JsonObject>();
             net["ssid"] = WiFi.SSID(i);
             net["rssi"] = WiFi.RSSI(i);
         }
         WiFi.scanDelete();
-        WiFi.scanNetworks(true);  // Start next scan
+        WiFi.scanNetworks(true);  // Start next scan for refresh
         String out;
         serializeJson(doc, out);
         req->send(200, "application/json", out);

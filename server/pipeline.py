@@ -20,6 +20,7 @@ import asyncio
 import logging
 import queue
 import threading
+import websockets
 from typing import Callable, Awaitable
 
 from elevenlabs.client import ElevenLabs
@@ -61,6 +62,16 @@ class ESP32AudioInterface(AudioInterface):
         self._running = False
         self._input_thread: threading.Thread | None = None
 
+        # Diagnostics counters
+        self._chunks_fed = 0         # Chunks fed to SDK from ESP32 mic
+        self._chunks_output = 0      # Chunks received from SDK (TTS)
+        self._bytes_in = 0
+        self._bytes_out = 0
+        self._diag_timer: threading.Timer | None = None
+        
+        self._output_queue: asyncio.Queue[bytes] = asyncio.Queue()
+        self._output_task: asyncio.Task | None = None
+
     def start(self, input_callback):
         """Called by the SDK to start audio capture."""
         self._input_callback = input_callback
@@ -69,34 +80,58 @@ class ESP32AudioInterface(AudioInterface):
             target=self._input_loop, daemon=True, name="esp32-audio-in"
         )
         self._input_thread.start()
-        logger.debug("ESP32 audio interface started")
+        
+        # Start async output pump to pace audio to the ESP32
+        self._output_task = self._loop.create_task(self._output_pump())
+        
+        self._start_diagnostics()
+        logger.info("ESP32 audio interface started — waiting for mic data")
 
     def stop(self):
         """Called by the SDK to stop audio capture."""
         self._running = False
+        self._stop_diagnostics()
         self._input_queue.put(None)  # Unblock the reader thread
         if self._input_thread is not None:
             self._input_thread.join(timeout=2)
             self._input_thread = None
-        logger.debug("ESP32 audio interface stopped")
+            
+        if self._output_task is not None:
+            self._output_task.cancel()
+            self._output_task = None
+        logger.info(
+            f"ESP32 audio interface stopped — "
+            f"mic→SDK: {self._chunks_fed} chunks ({self._bytes_in:,}B), "
+            f"SDK→ESP: {self._chunks_output} chunks ({self._bytes_out:,}B)"
+        )
+
+    # Max bytes per WebSocket frame sent to ESP32.
+    # The ESP32 WebSocketsClient must allocate a buffer for each frame.
+    # With ~100KB free heap, we keep frames small to avoid OOM disconnects.
+    MAX_WS_FRAME = 2048  # ~23ms at 44.1kHz 16-bit mono
 
     def output(self, audio: bytes):
         """
         Called by the SDK (from its thread) when agent TTS audio is ready.
-        Forwards raw PCM to the ESP32 via the asyncio WebSocket.
+        The SDK may deliver large blobs (50KB+). We chunk them and enqueue
+        them for the async pump to send at real-time speed.
         """
-        try:
-            future = asyncio.run_coroutine_threadsafe(
-                self._send_audio(audio), self._loop
-            )
-            # Block briefly to apply backpressure if the WebSocket is slow
-            future.result(timeout=5)
-        except Exception as e:
-            logger.warning(f"Failed to send audio to ESP32: {e}")
+        self._bytes_out += len(audio)
+
+        # Split into ESP32-friendly chunks and queue them
+        offset = 0
+        while offset < len(audio):
+            chunk = audio[offset : offset + self.MAX_WS_FRAME]
+            offset += len(chunk)
+            self._chunks_output += 1
+            self._loop.call_soon_threadsafe(self._output_queue.put_nowait, chunk)
 
     def interrupt(self):
         """Called by the SDK when the user interrupts the agent mid-speech."""
         logger.info("User interrupted the agent")
+        # Clear any queued audio that hasn't been sent yet
+        self._loop.call_soon_threadsafe(self._clear_output_queue)
+        
         # Tell ESP32/mock client to flush its playback buffer immediately
         try:
             asyncio.run_coroutine_threadsafe(
@@ -105,6 +140,14 @@ class ESP32AudioInterface(AudioInterface):
         except Exception as e:
             logger.warning(f"Failed to send interrupt to ESP32: {e}")
 
+    def _clear_output_queue(self):
+        """Drain the output queue (must be called from event loop thread)."""
+        while not self._output_queue.empty():
+            try:
+                self._output_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+
     # -- Public API for the pipeline --
 
     def feed_audio(self, pcm_bytes: bytes):
@@ -112,6 +155,7 @@ class ESP32AudioInterface(AudioInterface):
         Feed ESP32 microphone PCM into the SDK.
         Called from the async pump task — safe to use from any thread.
         """
+        self._bytes_in += len(pcm_bytes)
         try:
             self._input_queue.put_nowait(pcm_bytes)
         except queue.Full:
@@ -121,6 +165,7 @@ class ESP32AudioInterface(AudioInterface):
 
     def _input_loop(self):
         """Background thread: drains the queue and feeds the SDK."""
+        first_chunk_logged = False
         while self._running:
             try:
                 chunk = self._input_queue.get(timeout=0.1)
@@ -129,7 +174,67 @@ class ESP32AudioInterface(AudioInterface):
             if chunk is None:
                 break
             if self._input_callback is not None:
+                self._chunks_fed += 1
+                if not first_chunk_logged:
+                    logger.info(f"✓ First mic chunk fed to SDK ({len(chunk)} bytes)")
+                    first_chunk_logged = True
                 self._input_callback(chunk)
+
+    async def _output_pump(self):
+        """
+        Async task that reads from _output_queue and sends to ESP32.
+        Paces the sending to match real-time playback (44.1kHz 16-bit mono)
+        so the ESP32's tiny 4KB playback buffer and TCP window don't overflow.
+        """
+        # 44.1kHz 16-bit mono = 88,200 bytes per second
+        BYTES_PER_SEC = 44100 * 2
+        
+        try:
+            while self._running:
+                chunk = await self._output_queue.get()
+                
+                # Send the chunk
+                try:
+                    await self._send_audio(chunk)
+                except websockets.exceptions.ConnectionClosed:
+                    break
+                except Exception as e:
+                    logger.warning(f"Failed to send audio to ESP32: {e}")
+                    break
+                    
+                # Sleep exactly the duration of the audio we just sent
+                duration = len(chunk) / BYTES_PER_SEC
+                
+                # Sleep slightly less (80%) to ensure we keep the ESP32 buffer full,
+                # but not so fast that we overwhelm its TCP/WebSocket buffers.
+                await asyncio.sleep(duration * 0.80)
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.error(f"Output pump crashed: {e}")
+
+    def _start_diagnostics(self):
+        """Log audio flow stats every 5 seconds."""
+        def _log_stats():
+            if not self._running:
+                return
+            logger.info(
+                f"📊 Audio: mic→SDK {self._chunks_fed} chunks ({self._bytes_in:,}B) | "
+                f"SDK→ESP {self._chunks_output} chunks ({self._bytes_out:,}B) | "
+                f"queue: {self._input_queue.qsize()}"
+            )
+            self._diag_timer = threading.Timer(5.0, _log_stats)
+            self._diag_timer.daemon = True
+            self._diag_timer.start()
+
+        self._diag_timer = threading.Timer(5.0, _log_stats)
+        self._diag_timer.daemon = True
+        self._diag_timer.start()
+
+    def _stop_diagnostics(self):
+        if self._diag_timer is not None:
+            self._diag_timer.cancel()
+            self._diag_timer = None
 
 
 # =============================================================================
