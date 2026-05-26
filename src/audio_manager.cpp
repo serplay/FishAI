@@ -16,14 +16,14 @@ bool AudioManager::beginAmplifier() {
 
     i2s_config_t config = {};
     config.mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX);
-    config.sample_rate = AUDIO_SAMPLE_RATE;
+    config.sample_rate = AUDIO_SAMPLE_RATE_AMP;  // 44.1kHz for HQ playback
     config.bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT;
     config.channel_format = I2S_CHANNEL_FMT_ONLY_LEFT;  // MAX98357A mono
     config.communication_format = I2S_COMM_FORMAT_STAND_I2S;
     config.intr_alloc_flags = ESP_INTR_FLAG_LEVEL1;
     config.dma_buf_count = I2S_DMA_BUF_COUNT;
     config.dma_buf_len = I2S_DMA_BUF_LEN;
-    config.use_apll = false;    // APB clock is fine for 16kHz
+    config.use_apll = true;     // APLL for accurate 44.1kHz clock
     config.tx_desc_auto_clear = true;  // Zero-fill on underrun (prevents pops)
 
     i2s_pin_config_t pins = {};
@@ -60,7 +60,7 @@ bool AudioManager::beginMicrophone() {
 
     i2s_config_t config = {};
     config.mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX);
-    config.sample_rate = AUDIO_SAMPLE_RATE;
+    config.sample_rate = AUDIO_SAMPLE_RATE_MIC;  // 16kHz for speech input
     // INMP441 outputs 32-bit frames. We read as 32-bit and truncate
     // the upper 16 bits in software — the lower 16 bits are noise/padding.
     config.bits_per_sample = I2S_BITS_PER_SAMPLE_32BIT;

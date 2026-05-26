@@ -40,10 +40,17 @@ logging.basicConfig(
 logger = logging.getLogger("mock_client")
 
 # Audio format — must match ESP32 / server config
-SAMPLE_RATE = 16000
+MIC_SAMPLE_RATE = 16000    # Mic input: 16kHz for wake word + ConvAI
+SPK_SAMPLE_RATE = 44100    # Speaker output: 44.1kHz for HQ TTS playback
 CHANNELS = 1
 DTYPE = "int16"
-BLOCKSIZE = 512  # 512 samples = 1024 bytes, matches ESP32 chunk size
+MIC_BLOCKSIZE = 512        # 512 samples @ 16kHz = 32ms
+SPK_BLOCKSIZE = 1024       # 1024 samples @ 44.1kHz = ~23ms
+
+# Noise gate — mic RMS below this threshold sends silence instead of noise.
+# Prevents ElevenLabs VAD from triggering on background noise.
+# Raise this if you still get false interruptions; lower if your voice is gated.
+MIC_NOISE_GATE = 300       # RMS threshold (int16 scale, ~0.01 of max 32767)
 
 
 # =============================================================================
@@ -496,13 +503,18 @@ class MockClientApp:
         if not (self.connected and self.ws and self.loop):
             return
 
-        pcm_bytes = indata.tobytes()
-        self._bytes_sent += len(pcm_bytes)
-
-        # Compute RMS for the level meter (cheap — just int16 math)
+        # Compute RMS for the level meter and noise gate
         samples = indata[:, 0].astype(np.float32)
         rms = np.sqrt(np.mean(samples * samples))
         self._mic_rms = min(1.0, rms / 8000.0)
+
+        # Noise gate: send silence if below threshold to avoid false interrupts
+        if rms < MIC_NOISE_GATE:
+            pcm_bytes = b"\x00" * (frames * 2)  # 16-bit silence
+        else:
+            pcm_bytes = indata.tobytes()
+
+        self._bytes_sent += len(pcm_bytes)
 
         try:
             asyncio.run_coroutine_threadsafe(self.ws.send(pcm_bytes), self.loop)
@@ -534,21 +546,21 @@ class MockClientApp:
         self._spk_rms = min(1.0, rms / 8000.0)
 
     def _start_audio_streams(self):
-        self._log("Starting audio streams (16kHz, 16-bit, mono)", tag="dim")
+        self._log(f"Starting audio: mic {MIC_SAMPLE_RATE}Hz / spk {SPK_SAMPLE_RATE}Hz, 16-bit mono", tag="dim")
         with self.buffer_lock:
             self.playback_buffer.clear()
 
         try:
             self.mic_stream = sd.InputStream(
-                device=self.mic_idx, samplerate=SAMPLE_RATE,
-                channels=CHANNELS, dtype=DTYPE, blocksize=BLOCKSIZE,
+                device=self.mic_idx, samplerate=MIC_SAMPLE_RATE,
+                channels=CHANNELS, dtype=DTYPE, blocksize=MIC_BLOCKSIZE,
                 callback=self._audio_input_callback,
             )
             self.mic_stream.start()
 
             self.spk_stream = sd.OutputStream(
-                device=self.spk_idx, samplerate=SAMPLE_RATE,
-                channels=CHANNELS, dtype=DTYPE, blocksize=BLOCKSIZE,
+                device=self.spk_idx, samplerate=SPK_SAMPLE_RATE,
+                channels=CHANNELS, dtype=DTYPE, blocksize=SPK_BLOCKSIZE,
                 callback=self._audio_output_callback,
             )
             self.spk_stream.start()

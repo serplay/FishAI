@@ -271,19 +271,20 @@ async def handle_connection(websocket: ServerConnection):
 
 
 def _configure_agent():
-    """Ensure the ElevenLabs agent uses the right TTS model at startup."""
+    """Ensure the ElevenLabs agent uses the right TTS model and output format."""
     try:
         client = ElevenLabs(api_key=ELEVENLABS_API_KEY)
         client.conversational_ai.agents.update(
             agent_id=ELEVENLABS_AGENT_ID,
             conversation_config={
                 "tts": {"model_id": "eleven_v3_conversational"},
+                "output_format": "pcm_44100",
             },
         )
-        logger.info("Agent configured: eleven_v3_conversational")
+        logger.info("Agent configured: eleven_v3_conversational, pcm_44100")
     except Exception as e:
-        logger.warning(f"Could not configure agent TTS model: {e}")
-        logger.warning("The agent will use whatever model is set in the dashboard")
+        logger.warning(f"Could not configure agent: {e}")
+        logger.warning("Set TTS model and output format in the ElevenLabs dashboard")
 
 
 async def main():

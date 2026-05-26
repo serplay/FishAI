@@ -41,8 +41,11 @@
 // I2S CONFIGURATION
 // =============================================================================
 
-// Audio sample rate — 16kHz is optimal for speech on ESP32 w/o PSRAM
-#define AUDIO_SAMPLE_RATE     16000
+// Audio sample rates — separate for mic input and speaker output
+// Mic: 16kHz for wake word detection and ConvAI speech input
+// Amp: 44.1kHz for high-quality TTS playback from ElevenLabs
+#define AUDIO_SAMPLE_RATE_MIC     16000
+#define AUDIO_SAMPLE_RATE_AMP     44100
 
 // Bits per sample — INMP441 outputs 32-bit frames, we'll read as 32 and
 // truncate to 16 for network/processing efficiency
