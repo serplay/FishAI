@@ -96,6 +96,8 @@ static void dnsTask(void* param) {
 
 void NetworkManager::begin() {
     _prefs.begin(NVS_NAMESPACE, false);
+    _wsMutex = xSemaphoreCreateMutex();           // ← ADD THIS LINE
+    configASSERT(_wsMutex);
 }
 
 // =============================================================================
@@ -310,19 +312,28 @@ void NetworkManager::disconnectWebSocket() {
 }
 
 void NetworkManager::sendAudioChunk(const uint8_t* data, size_t len) {
-    if (_wsConnected) {
+    if (!_wsConnected) return;
+    if (xSemaphoreTake(_wsMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
         _wsClient.sendBIN(data, len);
+        xSemaphoreGive(_wsMutex);
     }
+    // If we can't grab the mutex in 10 ms, drop the chunk.
+    // A missed mic frame is audible as a tiny glitch; a crash is not recoverable.
 }
 
 void NetworkManager::sendCommand(const char* jsonPayload) {
-    if (_wsConnected) {
+    if (!_wsConnected) return;
+    if (xSemaphoreTake(_wsMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
         _wsClient.sendTXT(jsonPayload);
+        xSemaphoreGive(_wsMutex);
     }
 }
 
 void NetworkManager::loopWebSocket() {
-    _wsClient.loop();
+    if (xSemaphoreTake(_wsMutex, pdMS_TO_TICKS(15)) == pdTRUE) {
+        _wsClient.loop();
+        xSemaphoreGive(_wsMutex);
+    }
 }
 
 void NetworkManager::_wsEvent(WStype_t type, uint8_t* payload, size_t length) {
@@ -330,7 +341,9 @@ void NetworkManager::_wsEvent(WStype_t type, uint8_t* payload, size_t length) {
         case WStype_CONNECTED:
             _wsConnected = true;
             Serial.println("[NET] WebSocket connected");
-            sendCommand("{\"type\":\"hello\",\"device\":\"billy_bass\"}");
+            // Call _wsClient directly — we're already inside loop() which holds _wsMutex.
+            // sendCommand() would try to re-acquire the mutex and silently fail.
+            _wsClient.sendTXT("{\"type\":\"hello\",\"device\":\"billy_bass\"}");
             break;
 
         case WStype_DISCONNECTED:
@@ -347,6 +360,8 @@ void NetworkManager::_wsEvent(WStype_t type, uint8_t* payload, size_t length) {
                     _wakeCb();
                 } else if (strcmp(msgType, "done") == 0 && _doneCb) {
                     _doneCb();
+                } else if (strcmp(msgType, "interrupt") == 0 && _interruptCb) {
+                    _interruptCb();
                 }
             }
             break;

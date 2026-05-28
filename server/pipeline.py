@@ -202,12 +202,14 @@ class ESP32AudioInterface(AudioInterface):
                     logger.warning(f"Failed to send audio to ESP32: {e}")
                     break
                     
-                # Sleep exactly the duration of the audio we just sent
+                # Sleep for the real-time duration of the chunk we just sent.
+                # The ESP32 has 16KB playback queue (~186ms) + I2S DMA (~23ms)
+                # of buffering. We pace at 95% real-time — just fast enough to
+                # keep the buffer topped up, but slow enough to avoid overflow.
+                # At 0.95×, the 16KB queue fills in ~3.5s which covers most
+                # conversational turns without dropping any chunks.
                 duration = len(chunk) / BYTES_PER_SEC
-                
-                # Sleep slightly less (80%) to ensure we keep the ESP32 buffer full,
-                # but not so fast that we overwhelm its TCP/WebSocket buffers.
-                await asyncio.sleep(duration * 0.80)
+                await asyncio.sleep(duration * 0.95)
         except asyncio.CancelledError:
             pass
         except Exception as e:
@@ -219,7 +221,7 @@ class ESP32AudioInterface(AudioInterface):
             if not self._running:
                 return
             logger.info(
-                f"📊 Audio: mic→SDK {self._chunks_fed} chunks ({self._bytes_in:,}B) | "
+                f"Audio: mic→SDK {self._chunks_fed} chunks ({self._bytes_in:,}B) | "
                 f"SDK→ESP {self._chunks_output} chunks ({self._bytes_out:,}B) | "
                 f"queue: {self._input_queue.qsize()}"
             )

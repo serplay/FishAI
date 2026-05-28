@@ -23,6 +23,9 @@ using WakeWordCallback = void (*)();
 /// Called when the server signals end-of-response
 using ResponseDoneCallback = void (*)();
 
+/// Called when the server signals an interrupt (user barge-in)
+using InterruptCallback = void (*)();
+
 // =============================================================================
 // NetworkManager — WiFi, AP, Web Server, and WebSocket Client
 // =============================================================================
@@ -70,6 +73,7 @@ public:
     void onAudioData(AudioDataCallback cb)       { _audioCb = cb; }
     void onWakeWord(WakeWordCallback cb)          { _wakeCb = cb; }
     void onResponseDone(ResponseDoneCallback cb)  { _doneCb = cb; }
+    void onInterrupt(InterruptCallback cb)        { _interruptCb = cb; }
 
     /// Read/write WiFi credentials from NVS
     bool loadWiFiCredentials(String& ssid, String& pass);
@@ -91,7 +95,9 @@ private:
     AsyncWebSocket* _ws = nullptr;
     WebSocketsClient _wsClient;
     Preferences _prefs;
-    
+    // network_manager.h
+    SemaphoreHandle_t _wsMutex = nullptr;
+
     bool _portalActive = false;
     bool _wsConnected = false;
 
@@ -99,6 +105,7 @@ private:
     AudioDataCallback   _audioCb = nullptr;
     WakeWordCallback    _wakeCb  = nullptr;
     ResponseDoneCallback _doneCb = nullptr;
+    InterruptCallback _interruptCb = nullptr;
 
     /// Build and register all web server routes
     void _setupRoutes();

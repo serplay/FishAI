@@ -56,7 +56,7 @@ static TaskHandle_t buttonTaskHandle  = nullptr;
 // Inter-task communication: ring buffer for server→amplifier audio
 // Using a FreeRTOS queue of fixed-size chunks to avoid heap fragmentation
 #define PLAYBACK_CHUNK_SIZE   512   // bytes per queue item
-#define PLAYBACK_QUEUE_DEPTH  8     // 8 × 512 = 4KB total
+#define PLAYBACK_QUEUE_DEPTH  32    // 32 × 512 = 16KB total (~186ms @ 44.1kHz)
 static QueueHandle_t playbackQueue = nullptr;
 
 // Lip-sync sample buffer shared between audio and motor tasks
@@ -106,6 +106,11 @@ static void a2dp_data_callback(const uint8_t* data, uint32_t len) {
 // =============================================================================
 
 static void onServerAudio(const uint8_t* data, size_t len) {
+    // Transition to RESPONDING on first audio from server
+    if (g_state == SystemState::AI_LISTENING) {
+        g_state = SystemState::AI_RESPONDING;
+    }
+
     // Enqueue audio chunks for the audio task to play
     // If queue is full, drop oldest — we can't block the WS callback
     size_t offset = 0;
@@ -125,14 +130,24 @@ static void onServerAudio(const uint8_t* data, size_t len) {
 
 static void onServerWake() {
     Serial.println("[AI] Server detected wake word!");
+    xQueueReset(playbackQueue);   // Drain stale audio from previous session
     g_state = SystemState::AI_LISTENING;
     Motors.raiseHead();
 }
 
 static void onServerDone() {
     Serial.println("[AI] Server response complete");
+    xQueueReset(playbackQueue);
     g_state = SystemState::AI_IDLE;
     Motors.lowerHead();
+    Motors.closeMouth();
+}
+
+static void onServerInterrupt() {
+    Serial.println("[AI] Agent interrupted — flushing playback");
+    xQueueReset(playbackQueue);
+    i2s_zero_dma_buffer(AMP_I2S_PORT);  // Stop current audio immediately
+    g_state = SystemState::AI_LISTENING;
     Motors.closeMouth();
 }
 
@@ -155,51 +170,61 @@ static void audioTask(void* param) {
     while (true) {
         SystemState state = g_state;
         
+        // --- Full-duplex: mic capture + playback run in ALL active AI states ---
+        // ConvAI needs mic even during AI_RESPONDING (for barge-in/interrupt).
         if (state == SystemState::AI_IDLE || 
-            state == SystemState::AI_LISTENING) {
-            // --- Read microphone and stream to server ---
+            state == SystemState::AI_LISTENING ||
+            state == SystemState::AI_RESPONDING) {
+
+            bool hasPlayback = (state == SystemState::AI_LISTENING ||
+                                state == SystemState::AI_RESPONDING);
+
+            // --- PLAYBACK FIRST (priority: keep DMA fed to avoid crackle) ---
+            // Drain ALL available chunks. writeToAmp blocks until DMA accepts
+            // the data (portMAX_DELAY), which naturally paces us to real-time.
+            // This is safe because the mic I2S DMA has ~64ms of buffering at
+            // 16kHz — plenty of headroom while we spend time writing amp data.
+            if (hasPlayback) {
+                while (xQueueReceive(playbackQueue, playChunk, 0) == pdTRUE) {
+                    size_t written = 0;
+                    Audio.writeToAmp(playChunk, PLAYBACK_CHUNK_SIZE, &written);
+                    
+                    // Feed lip-sync from playback data
+                    size_t sampleCount = PLAYBACK_CHUNK_SIZE / sizeof(int16_t);
+                    portENTER_CRITICAL(&g_lipSyncMux);
+                    memcpy(g_lipSyncBuf, playChunk, PLAYBACK_CHUNK_SIZE);
+                    g_lipSyncCount = sampleCount;
+                    portEXIT_CRITICAL(&g_lipSyncMux);
+                }
+            }
+
+            // --- MIC CAPTURE (secondary: best-effort during playback) ---
+            // Zero timeout during playback (don't block amp feeding).
+            // Longer timeout when idle (saves CPU, still responsive).
+            TickType_t micWait = hasPlayback ? 0 : pdMS_TO_TICKS(20);
             size_t bytesRead = 0;
             esp_err_t err = Audio.readFromMic(micRaw, sizeof(micRaw), 
-                                              &bytesRead, pdMS_TO_TICKS(100));
+                                              &bytesRead, micWait);
             if (err == ESP_OK && bytesRead > 0) {
                 size_t sampleCount = bytesRead / sizeof(int32_t);
                 
                 // Convert 32-bit INMP441 → 16-bit PCM
-                // INMP441 data is MSB-aligned in 32-bit frame:
-                // Useful data is in bits [31:16], lower bits are noise
                 for (size_t i = 0; i < sampleCount; i++) {
                     micConverted[i] = (int16_t)(micRaw[i] >> 16);
                 }
                 
-                // Send to server via WebSocket
+                // Send to server via WebSocket (mutex-protected, 10ms timeout)
                 Network.sendAudioChunk((uint8_t*)micConverted, 
                                        sampleCount * sizeof(int16_t));
-                
-                // Also feed lip-sync (in case we want to show mic activity)
-                // Usually we only lip-sync during playback, but this is here
-                // for potential "echo" visualization
             }
-        }
-        
-        if (state == SystemState::AI_RESPONDING) {
-            // --- Play audio from server ---
-            if (xQueueReceive(playbackQueue, playChunk, pdMS_TO_TICKS(50)) == pdTRUE) {
-                size_t written = 0;
-                Audio.writeToAmp(playChunk, PLAYBACK_CHUNK_SIZE, &written);
-                
-                // Feed lip-sync from playback data
-                size_t sampleCount = PLAYBACK_CHUNK_SIZE / sizeof(int16_t);
-                portENTER_CRITICAL(&g_lipSyncMux);
-                memcpy(g_lipSyncBuf, playChunk, PLAYBACK_CHUNK_SIZE);
-                g_lipSyncCount = sampleCount;
-                portEXIT_CRITICAL(&g_lipSyncMux);
+
+            // Brief yield when there was no playback data and no mic data
+            if (!hasPlayback || uxQueueMessagesWaiting(playbackQueue) == 0) {
+                vTaskDelay(pdMS_TO_TICKS(1));
             }
-        }
-        
-        // Yield to prevent watchdog — if nothing to do, sleep longer
-        if (state != SystemState::AI_IDLE && 
-            state != SystemState::AI_LISTENING && 
-            state != SystemState::AI_RESPONDING) {
+
+        } else {
+            // Not in AI mode — sleep longer to save CPU
             vTaskDelay(pdMS_TO_TICKS(50));
         }
     }
@@ -446,14 +471,19 @@ static void handleShortPress() {
     if (state == SystemState::AI_IDLE) {
         // Force wake — tell server to start listening, raise head
         Serial.println("[AI] Button wake override — forcing listen mode");
+        xQueueReset(playbackQueue);
         g_state = SystemState::AI_LISTENING;
         Motors.raiseHead();
         Network.sendCommand("{\"type\":\"button_wake\"}");
     }
-    else if (state == SystemState::AI_LISTENING) {
-        // Cancel listening — return to idle
+    else if (state == SystemState::AI_LISTENING || 
+             state == SystemState::AI_RESPONDING) {
+        // Cancel conversation — return to idle
+        Serial.println("[AI] Button cancel");
+        xQueueReset(playbackQueue);
         g_state = SystemState::AI_IDLE;
         Motors.lowerHead();
+        Motors.closeMouth();
         Network.sendCommand("{\"type\":\"cancel\"}");
     }
     else if (state == SystemState::BT_STREAMING) {
@@ -548,6 +578,7 @@ static void initAIAgentMode() {
     Network.onAudioData(onServerAudio);
     Network.onWakeWord(onServerWake);
     Network.onResponseDone(onServerDone);
+    Network.onInterrupt(onServerInterrupt);
     Network.connectWebSocket();
     
     g_state = SystemState::AI_IDLE;
